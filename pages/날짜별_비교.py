@@ -29,7 +29,7 @@ TOPIC_LABELS = {
 
 REQUIRED_COLUMNS = ["날짜/시간", "화자", "메시지", "TMSSR", "Potential"]
 CATEGORY_DISPLAY_ORDER = ["Eliciting", "Responding", "Facilitating", "Extending"]
-POTENTIAL_DISPLAY_ORDER = ["High", "Low"]
+POTENTIAL_DISPLAY_ORDER = ["Low", "High"]
 
 
 def get_category_order(column: str) -> list[str]:
@@ -90,6 +90,13 @@ def load_merged_by_date() -> dict[str, pd.DataFrame]:
 	return merged_by_date
 
 
+def load_all_merged_data(merged_by_date: dict[str, pd.DataFrame]) -> pd.DataFrame:
+	if not merged_by_date:
+		return pd.DataFrame(columns=REQUIRED_COLUMNS)
+
+	return pd.concat(list(merged_by_date.values()), ignore_index=True)
+
+
 def get_summary(df: pd.DataFrame) -> dict:
 	if df.empty:
 		return {
@@ -144,41 +151,30 @@ def make_distribution_table(merged_by_date: dict[str, pd.DataFrame], column: str
 		return pd.DataFrame()
 
 	combined = pd.concat(frames, ignore_index=True)
+	combined["빈도(비율)"] = combined.apply(
+		lambda row: f"{int(row['빈도'])} ({row['비율']:.1f}%)",
+		axis=1,
+	)
+
 	pivot = combined.pivot_table(
 		index="범주",
 		columns="자료",
-		values="빈도",
-		aggfunc="sum",
-		fill_value=0,
+		values="빈도(비율)",
+		aggfunc="first",
+		fill_value="0 (0.0%)",
 	).reset_index()
 
 	for date_label in DATE_CONFIG.keys():
 		if date_label not in pivot.columns:
-			pivot[date_label] = 0
+			pivot[date_label] = "0 (0.0%)"
 
-	ordered_columns = ["범주"] + list(DATE_CONFIG.keys())
-	pivot = pivot[ordered_columns]
-
-	for date_label in DATE_CONFIG.keys():
-		total = pivot[date_label].sum()
-		ratio_col = f"{date_label} 비율(%)"
-		if total == 0:
-			pivot[ratio_col] = 0.0
-		else:
-			pivot[ratio_col] = (pivot[date_label] / total * 100).round(1)
-
-	pivot["정렬값"] = pivot[list(DATE_CONFIG.keys())].sum(axis=1)
 	category_order = get_category_order(column)
 	order_map = {name: idx for idx, name in enumerate(category_order)}
 	pivot["정렬순서"] = pivot["범주"].map(order_map).fillna(len(category_order))
-	pivot = pivot.sort_values(["정렬순서", "정렬값"], ascending=[True, False])
+	pivot = pivot.sort_values("정렬순서")
 
-	result_columns = ["범주"]
-	for date_label in DATE_CONFIG.keys():
-		result_columns.append(date_label)
-		result_columns.append(f"{date_label} 비율(%)")
-
-	return pivot[result_columns]
+	ordered_columns = ["범주"] + list(DATE_CONFIG.keys())
+	return pivot[ordered_columns]
 
 
 def make_bar_chart(dist_df: pd.DataFrame, title: str, column: str):
@@ -207,8 +203,8 @@ def make_bar_chart(dist_df: pd.DataFrame, title: str, column: str):
 		fill_value=0,
 	)
 
-	date_order = list(DATE_CONFIG.keys())
-	x_labels = [get_date_topic_label(date_label) for date_label in date_order]
+	date_order = dist_df["자료"].dropna().drop_duplicates().tolist()
+	x_labels = [get_date_topic_label(date_label) if date_label in DATE_CONFIG else date_label for date_label in date_order]
 
 	percent_pivot = percent_pivot.reindex(date_order, fill_value=0)
 	count_pivot = count_pivot.reindex(date_order, fill_value=0)
@@ -251,6 +247,26 @@ def make_bar_chart(dist_df: pd.DataFrame, title: str, column: str):
 	)
 
 	st.plotly_chart(fig, use_container_width=True)
+
+
+def render_distribution_section(df: pd.DataFrame, column: str, title: str, label: str):
+	st.subheader(title)
+
+	dist_df = get_distribution(df, column, label)
+	table_df = make_distribution_table({label: df}, column)
+
+	left, right = st.columns([1, 1.4])
+
+	with left:
+		st.markdown("#### 빈도표")
+		if table_df.empty:
+			st.info("표시할 데이터가 없습니다.")
+		else:
+			st.dataframe(table_df, use_container_width=True, hide_index=True)
+
+	with right:
+		st.markdown("#### 누적 비율 막대 그래프")
+		make_bar_chart(dist_df, title, column)
 
 
 def make_tmssr_potential_table(df: pd.DataFrame) -> pd.DataFrame:
@@ -346,6 +362,17 @@ def render_summary_metrics_by_date(merged_by_date: dict[str, pd.DataFrame]):
 				st.metric("교사 발화 수", summary["사용자가 입력한 교사 발화 수"])
 
 
+def render_summary_metrics(df: pd.DataFrame, title: str):
+	st.subheader("1. 데이터 수 비교")
+	st.markdown(f"#### {title}")
+	summary = get_summary(df)
+	col1, col2 = st.columns(2)
+	with col1:
+		st.metric("사용된 데이터 수", summary["서로 다른 날짜/시간 수"])
+	with col2:
+		st.metric("교사 발화 수", summary["사용자가 입력한 교사 발화 수"])
+
+
 def render_distribution_section_by_date(merged_by_date: dict[str, pd.DataFrame], column: str, title: str):
 	st.subheader(title)
 
@@ -382,6 +409,12 @@ def render_tmssr_potential_section_by_date(merged_by_date: dict[str, pd.DataFram
 			make_tmssr_potential_heatmap(merged_by_date[date_label], date_label)
 
 
+def render_tmssr_potential_section(df: pd.DataFrame, title: str):
+	st.subheader("4. TMSSR x Potential 분포 비교")
+	st.markdown(f"#### {title}")
+	make_tmssr_potential_heatmap(df, title)
+
+
 def render_raw_data_by_date(merged_by_date: dict[str, pd.DataFrame]):
 	with st.expander("원자료 보기"):
 		tabs = st.tabs([get_date_topic_label(date_label) for date_label in DATE_CONFIG.keys()])
@@ -389,6 +422,24 @@ def render_raw_data_by_date(merged_by_date: dict[str, pd.DataFrame]):
 		for idx, date_label in enumerate(DATE_CONFIG.keys()):
 			with tabs[idx]:
 				st.dataframe(merged_by_date[date_label], use_container_width=True, height=420)
+
+
+def render_overall_page(df: pd.DataFrame, show_raw_data: bool):
+	render_summary_metrics(df, "전체 | 3개 날짜 합계")
+
+	st.divider()
+	render_distribution_section(df, column="TMSSR", title="2. TMSSR 범주 분포", label="전체 | 3개 날짜 합계")
+
+	st.divider()
+	render_distribution_section(df, column="Potential", title="3. Potential 범주 분포", label="전체 | 3개 날짜 합계")
+
+	st.divider()
+	render_tmssr_potential_section(df, "전체 | 3개 날짜 합계")
+
+	if show_raw_data:
+		st.divider()
+		with st.expander("원자료 보기"):
+			st.dataframe(df, use_container_width=True, height=420)
 
 
 st.title("날짜별 TMSSR 데이터 비교 대시보드")
@@ -405,29 +456,35 @@ with st.sidebar:
 
 
 merged_data = load_merged_by_date()
+all_merged_data = load_all_merged_data(merged_data)
 
-render_summary_metrics_by_date(merged_data)
+tab_labels = ["기존 내용(날짜별 비교)", "전체(3개 날짜 합계)"]
+tabs = st.tabs(tab_labels)
 
-st.divider()
 
-render_distribution_section_by_date(
-	merged_by_date=merged_data,
-	column="TMSSR",
-	title="2. TMSSR 범주 분포",
-)
+with tabs[0]:
+	render_summary_metrics_by_date(merged_data)
 
-st.divider()
-
-render_distribution_section_by_date(
-	merged_by_date=merged_data,
-	column="Potential",
-	title="3. Potential 범주 분포",
-)
-
-st.divider()
-
-render_tmssr_potential_section_by_date(merged_data)
-
-if show_raw_data:
 	st.divider()
-	render_raw_data_by_date(merged_data)
+	render_distribution_section_by_date(
+		merged_by_date=merged_data,
+		column="TMSSR",
+		title="2. TMSSR 범주 분포",
+	)
+
+	st.divider()
+	render_distribution_section_by_date(
+		merged_by_date=merged_data,
+		column="Potential",
+		title="3. Potential 범주 분포",
+	)
+
+	st.divider()
+	render_tmssr_potential_section_by_date(merged_data)
+
+	if show_raw_data:
+		st.divider()
+		render_raw_data_by_date(merged_data)
+
+with tabs[1]:
+	render_overall_page(all_merged_data, show_raw_data)
